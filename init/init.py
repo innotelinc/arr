@@ -831,6 +831,12 @@ def configure_jellyfin_ldap():
     if not token:
         _issues.append("jellyfin-ldap: no Jellyfin admin token available - run Jellyfin setup first")
         return False
+    if not AUTHENTIK_BASE_URL or not AUTHENTIK_BOOTSTRAP_TOKEN:
+        # Authentik is not part of this deployment (e.g. the CI full-stack
+        # check blanks it on purpose) - there is no LDAP outpost to point the
+        # plugin at, and installing it would restart Jellyfin for nothing.
+        _log("WARNING: Authentik not configured - skipping Jellyfin LDAP wiring.")
+        return False
     if not LDAP_BIND_TOKEN:
         _issues.append("jellyfin-ldap: AUTHENTIK_LDAP_BIND_TOKEN is not set in docker-compose.yml")
         return False
