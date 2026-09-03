@@ -402,51 +402,87 @@ if [ "$FULL_STACK" = "1" ]; then
   $SUDO chown -R 1000:1000 /data /docker/appdata /opt/epg 2>/dev/null || true
 
   # Throwaway .env (test domain + random password), Authentik blanked so
-  # init.py and the drift check both skip it.
+  # init.py and the drift check both skip it. docker-compose.yml hardcodes
+  # AUTHENTIK_BASE_URL and `${AUTHENTIK_BOOTSTRAP_TOKEN:-...}` falls back to
+  # the default for an EMPTY value, so a .env blank is not enough - use a
+  # compose override file that forces both to empty for the init container.
   render_env "$SCRATCH/.env"
   sed -i -e 's|^AUTHENTIK_BASE_URL=.*|AUTHENTIK_BASE_URL=|' \
          -e 's|^AUTHENTIK_BOOTSTRAP_TOKEN=.*|AUTHENTIK_BOOTSTRAP_TOKEN=|' \
          -e 's|^JELLYFIN_URL=.*|JELLYFIN_URL=http://jellyfin:8096|' \
          -e 's|^REQUEST_URL=.*|REQUEST_URL=https://req.monarch-check.test|' \
          "$SCRATCH/.env"
+  cat > "$SCRATCH/no-authentik.yml" <<EOF
+services:
+  monarch-init:
+    environment:
+      AUTHENTIK_BASE_URL: ""
+      AUTHENTIK_BOOTSTRAP_TOKEN: ""
+EOF
 
-  echo "  Starting the probe-able stack + monarch-init (image pulls may take a while)..."
-  # Start everything the drift check probes. monarch-init's depends_on pulls
-  # in sabnzbd + iptv automatically; it is a one-shot (restart: no) that
-  # exits once it has wired the stack.
+  echo "  Starting the probe-able stack (image pulls may take a while)..."
+  # Start ONLY the services the drift check probes (qbittorrent pulls in
+  # monarch-seed via depends_on). sabnzbd + iptv are monarch-init's deps but
+  # are NOT probed and iptv's RUN_AT_STARTUP EPG grab spikes memory on a
+  # small CI runner - keep them out and run init with --no-deps.
   if ! MONARCH_DOMAIN="$TEST_DOMAIN" docker compose -f docker-compose.yml \
-       --env-file "$SCRATCH/.env" up -d monarch-init > "$SCRATCH/up.log" 2>&1; then
-    bad "docker compose up -d monarch-init failed:"
+       --env-file "$SCRATCH/.env" up -d jellyfin sonarr radarr lidarr whisparr \
+       prowlarr qbittorrent bazarr jellyseerr > "$SCRATCH/up.log" 2>&1; then
+    bad "docker compose up -d (probe-able services) failed:"
     tail -20 "$SCRATCH/up.log" | sed 's/^/    /'
     exit 1
   fi
-  ok "stack started (monarch-init + its dependencies)"
+  ok "stack started (jellyfin, *arrs, prowlarr, qBittorrent, bazarr, jellyseerr)"
 
-  echo "  Waiting for monarch-init to finish wiring the stack..."
-  if ! docker wait monarch-init > /dev/null 2>&1; then
-    bad "monarch-init failed to run"
-    docker logs --tail 40 monarch-init 2>&1 | sed 's/^/    /'
+  echo "  Running monarch-init to wire the stack..."
+  if ! MONARCH_DOMAIN="$TEST_DOMAIN" docker compose -f docker-compose.yml \
+       -f "$SCRATCH/no-authentik.yml" \
+       --env-file "$SCRATCH/.env" run --rm --no-deps monarch-init \
+       > "$SCRATCH/init.log" 2>&1; then
+    bad "monarch-init failed to run:"
+    tail -40 "$SCRATCH/init.log" | sed 's/^/    /'
     exit 1
   fi
   ok "monarch-init completed"
 
-  echo "  Last monarch-init log lines:"
-  docker logs --tail 12 monarch-init 2>&1 | sed 's/^/    /'
+  echo "  monarch-init summary:"
+  grep -E 'monarch-init\] (SUMMARY|MANUAL|[[:space:]]+[a-z-]+[[:space:]]+configured|\* )' "$SCRATCH/init.log" | sed 's/^/    /' | head -30
 
+  echo "  Last monarch-init log lines:"
+  docker logs --tail 20 monarch-init 2>&1 | sed 's/^/    /'
+
+  echo "  Waiting for Jellyfin to be responsive again (it restarts for the LDAP plugin)..."
+  n=0
+  while [ "$n" -lt 24 ]; do
+    if curl -sf -o /dev/null http://127.0.0.1:8096/System/Info/Public 2>/dev/null; then break; fi
+    n=$((n + 1)); sleep 5
+  done
   echo "  Running the real drift check..."
-  # Give each service a moment to settle after init (Jellyfin restarts for
-  # the LDAP plugin, Jellyseerr reconnects, ...).
-  sleep 15
+  sleep 10
   if MONARCH_ENV="$SCRATCH/.env" bash scripts/drift-check.sh --quiet; then
     ok "real drift check passed against the booted stack (exit 0)"
   else
     bad "real drift check FAILED against the booted stack"
+    echo "  Diagnosing the failing services (logs below):"
+    for c in jellyfin jellyseerr sonarr radarr lidarr whisparr prowlarr qbittorrent bazarr; do
+      st="$(docker inspect -f '{{.State.Status}} (restarts={{.RestartCount}})' "$c" 2>/dev/null || echo down)"
+      echo "    $c: $st"
+    done
+    for c in jellyfin jellyseerr; do
+      echo "    --- $c log tail ---"
+      docker logs --tail 25 "$c" 2>&1 | sed 's/^/      /'
+    done
+    echo "    --- OOM evidence (dmesg) ---"
+    if dmesg 2>/dev/null | grep -iE 'oom|killed process' | tail -8 | sed 's/^/      /'; then :; else echo "      (dmesg unavailable - no permission)"; fi
+    echo "    --- container memory (top 8 by RSS) ---"
+    docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' 2>/dev/null | sort -k2 -hr | head -8 | sed 's/^/      /' || true
     echo "  (re-run manually with MONARCH_CHECK_KEEP=1 to inspect the stack)"
   fi
 
   if [ "${MONARCH_CHECK_KEEP:-0}" != "1" ]; then
     echo "  Tearing the stack down (keep it up with MONARCH_CHECK_KEEP=1)..."
     MONARCH_DOMAIN="$TEST_DOMAIN" docker compose -f docker-compose.yml \
+      -f "$SCRATCH/no-authentik.yml" \
       --env-file "$SCRATCH/.env" down --remove-orphans > /dev/null 2>&1 || true
     $SUDO rm -rf /data/media /data/torrents /docker/appdata /opt/epg 2>/dev/null || true
   fi

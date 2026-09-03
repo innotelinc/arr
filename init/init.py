@@ -568,19 +568,27 @@ def configure_jellyfin():
             return False
         time.sleep(3)
 
-    # Log in and keep the admin token as the de-facto API key.
+    # Log in and keep the admin token as the de-facto API key. Right after
+    # the wizard is completed Jellyfin restarts itself (setup mode -> normal),
+    # so on a slow first boot AuthenticateByName can 401 for a few seconds -
+    # wait for the server to settle, then retry the login a few times.
     auth_header = (
         'MediaBrowser Client="Monarch Init", Device="Linux", '
         'DeviceId="monarch-init-001", Version="1.0.0"'
     )
-    status, text, j = _http(
-        JELLYFIN_BASE, "/Users/AuthenticateByName", method="POST",
-        body={"Username": USER, "Pw": PASS},
-        headers={"X-Emby-Authorization": auth_header},
-    )
     token = None
-    if status in (200, 201) and isinstance(j, dict):
-        token = j.get("AccessToken")
+    for attempt in range(6):
+        if attempt:
+            time.sleep(10)
+        status, text, j = _http(
+            JELLYFIN_BASE, "/Users/AuthenticateByName", method="POST",
+            body={"Username": USER, "Pw": PASS},
+            headers={"X-Emby-Authorization": auth_header},
+        )
+        if status in (200, 201) and isinstance(j, dict) and j.get("AccessToken"):
+            token = j["AccessToken"]
+            break
+        _log(f"Jellyfin login attempt {attempt + 1}/6 -> HTTP {status} (server may still be settling after the wizard)")
     if not token:
         # A wizard marked complete with zero users is a dead end: reset the
         # flag so the next Jellyfin start re-runs the first-run wizard (and
