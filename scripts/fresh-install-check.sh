@@ -394,12 +394,23 @@ if [ "$FULL_STACK" = "1" ]; then
   fi
 
   # Create the host layout the compose file mounts (/data for the media
-  # folders + appdata, owned by the containers' PUID 1000), like
-  # install-monarch.sh create_data_dirs does.
+  # folders + appdata, owned by the containers' PUID 1000), exactly like
+  # install-monarch.sh create_data_dirs does. Every appdata service dir is
+  # pre-created here on purpose: Docker creates missing bind-mount sources
+  # as root, and Jellyseerr (unlike the hotio images) has no root init to
+  # chown /config itself - a root-owned dir crash-loops it with EACCES on
+  # a genuinely fresh host.
   $SUDO mkdir -p /data/media/{tv,movies,music,xxx} \
                 /data/torrents/{tv,movies,music,xxx} \
                 /docker/appdata /opt/epg
-  $SUDO chown -R 1000:1000 /data /docker/appdata /opt/epg 2>/dev/null || true
+  for svc in jellyfin jellyseerr sonarr radarr lidarr whisparr prowlarr \
+             qbittorrent bazarr homarr; do
+    $SUDO mkdir -p "/docker/appdata/$svc"
+    $SUDO chown -R 1000:1000 "/docker/appdata/$svc" 2>/dev/null || true
+  done
+  $SUDO mkdir -p /docker/appdata/homarr/configs
+  $SUDO chown -R 1000:1000 /docker/appdata 2>/dev/null || true
+  $SUDO chown -R 1000:1000 /data /opt/epg 2>/dev/null || true
 
   # Throwaway .env (test domain + random password), Authentik blanked so
   # init.py and the drift check both skip it. docker-compose.yml hardcodes
