@@ -445,11 +445,12 @@ EOF
   fi
   ok "monarch-init completed"
 
-  echo "  monarch-init summary:"
-  grep -E 'monarch-init\] (SUMMARY|MANUAL|[[:space:]]+[a-z-]+[[:space:]]+configured|\* )' "$SCRATCH/init.log" | sed 's/^/    /' | head -30
-
-  echo "  Last monarch-init log lines:"
-  docker logs --tail 20 monarch-init 2>&1 | sed 's/^/    /'
+  echo "  monarch-init summary (from init.log):"
+  # `compose run --rm` removes the container when done, so pull the summary
+  # from the captured log, not `docker logs`. Show every line from SUMMARY
+  # through the manual-action items.
+  sed -n '/monarch-init\] SUMMARY/,$p' "$SCRATCH/init.log" | \
+    grep -v 'monarch-init\] =' | sed 's/^/    /' | head -40
 
   echo "  Waiting for Jellyfin to be responsive again (it restarts for the LDAP plugin)..."
   n=0
