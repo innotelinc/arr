@@ -229,6 +229,11 @@ if grep -q "__DOMAIN__" "$plan" || grep -Eq "(^|[^a-z0-9-])monarch\.innotel\.us"
 else
   ok "plan uses only the test domain"
 fi
+# Drop the throwaway NPM credentials exported for the dry run - they are
+# check@$TEST_DOMAIN, not the real sample credentials, and stage 3 must
+# provision NPM with the latter (npm-proxy-hosts.py prefers exported vars
+# over .env, so leftovers here would silently create the wrong admin).
+unset NPM_ADMIN_EMAIL NPM_ADMIN_PASSWORD NPM_DNS_PROVIDER
 
 # ── Stage 1d: compose file interpolation (docker CLI, no daemon needed) ────
 if command -v docker > /dev/null 2>&1 && docker compose version > /dev/null 2>&1; then
@@ -480,9 +485,13 @@ EOF
   # The drift check verifies the live hosts, so create them first (no cert -
   # a Let's Encrypt wildcard can't be issued for the throwaway test domain).
   # The sample .env's NPM admin creds are used; on a first-boot NPM the
-  # script creates that account itself.
-  if ! MONARCH_DOMAIN="$TEST_DOMAIN" python3 scripts/npm-proxy-hosts.py \
-       --hosts-only --skip-ssl > "$SCRATCH/npm.log" 2>&1; then
+  # script creates that account itself. Source the scratch .env in a
+  # subshell: stage 1c exported check@monarch-check.test for its dry run,
+  # and exported vars win over load_env - without this, provisioning would
+  # create a DIFFERENT admin than the drift check later logs in as.
+  if ! ( set -a; . "$SCRATCH/.env"; set +a; \
+         MONARCH_DOMAIN="$TEST_DOMAIN" python3 scripts/npm-proxy-hosts.py \
+           --hosts-only --skip-ssl ) > "$SCRATCH/npm.log" 2>&1; then
     bad "npm-proxy-hosts.py provisioning failed:"
     tail -20 "$SCRATCH/npm.log" | sed 's/^/    /'
     exit 1
